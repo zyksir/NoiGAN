@@ -712,14 +712,16 @@ class SimpleNN(nn.Module):
 
         # pos_head, pos_relation, pos_tail = self.get_embedding(embed_model, pos)
         neg_head, neg_relation, neg_tail = self.get_embedding(embed_model, (pos, neg), mode=mode)
-        if model_name == "TransE":
-            scores = self.forward(neg_head + neg_relation - neg_tail).view(batch_size,
-                                                                           negative_sample_size) / temperature
-        elif model_name == "ComplEx":
-            scores = self.forward(ComplEx(neg_head, neg_relation, neg_tail)).view(batch_size,
-                                                                           negative_sample_size) / temperature
-        else:
-            raise Exception("TransE or ComplEx??")
+        model_func = {'TransE': embed_model.TransE, 'DistMult': embed_model.DistMult, 'ComplEx': embed_model.ComplEx}
+        scores = model_func[embed_model.model_name](neg_head, neg_relation, neg_tail, mode="head-batch")
+        # if model_name == "TransE":
+        #     scores = self.forward(neg_head + neg_relation - neg_tail).view(batch_size,
+        #                                                                    negative_sample_size) / temperature
+        # elif model_name == "ComplEx":
+        #     scores = self.forward(ComplEx(neg_head, neg_relation, neg_tail)).view(batch_size,
+        #                                                                    negative_sample_size) / temperature
+        # else:
+        #     raise Exception("TransE or ComplEx??")
         probs = torch.softmax(scores, dim=1)
         row_idx = torch.arange(0, batch_size).type(torch.LongTensor).unsqueeze(1).expand(batch_size, n_sample)
         sample_idx = torch.multinomial(probs, n_sample, replacement=True)
