@@ -41,7 +41,7 @@ CUDA_VISIBLE_DEVICES=$GPU_DEVICE python -u $CODE_PATH/run.py --do_train \
     -g $GAMMA -a $ALPHA -adv \
     -lr $LEARNING_RATE --max_steps $MAX_STEPS \
     -save $SAVE --test_batch_size $TEST_BATCH_SIZE \
-    ${14} ${15} ${16} ${17} ${18} ${19} ${20}
+    ${14} ${15} ${16} ${17} ${18} ${19} ${20} ${21} ${22} ${23} ${24} ${25} ${26}
 
 elif [ $MODE == "valid" ]
 then
