@@ -76,10 +76,10 @@ def generate_fake_data(data_path="../data/FB15k/", num=10):
 # generate_fake_data(data_path="../data/FB15k-237/", num=50)
 # generate_fake_data(data_path="../data/FB15k-237/", num=70)
 # generate_fake_data(data_path="../data/FB15k-237/", num=100)
-generate_fake_data(data_path="../data/YAGO3-10/", num=30)
-generate_fake_data(data_path="../data/YAGO3-10/", num=50)
-generate_fake_data(data_path="../data/YAGO3-10/", num=70)
-generate_fake_data(data_path="../data/YAGO3-10/", num=100)
+# generate_fake_data(data_path="../data/YAGO3-10/", num=30)
+# generate_fake_data(data_path="../data/YAGO3-10/", num=50)
+# generate_fake_data(data_path="../data/YAGO3-10/", num=70)
+# generate_fake_data(data_path="../data/YAGO3-10/", num=100)
 
 def generate_fakePath_data(data_path="../data/FB15k/", num=10):
     def read_triple(file_path, entity2id, relation2id):
@@ -143,6 +143,7 @@ def generate_fakePath_data(data_path="../data/FB15k/", num=10):
     with open(os.path.join(data_path, "fakePath%d.pkl" % num), "wb") as f:
         pickle.dump(fake_triples, f)
 
+generate_fakePath_data(data_path='../data/FB15k-237', num=40)
 # generate_fakePath_data(data_path="../data/wn18rr", num=30)
 # generate_fakePath_data(data_path="../data/wn18rr", num=50)
 # generate_fakePath_data(data_path="../data/wn18rr", num=70)

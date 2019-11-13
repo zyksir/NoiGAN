@@ -436,11 +436,11 @@ def main(args):
             logging.info("fake triples in classifier training %d / %d" % (
                 len(set(fake_triples).intersection(set(clf_iterator.dataloader_head.dataset.triples))),
                 len(clf_iterator.dataloader_head.dataset.triples)))
-            for epoch in range(200):
+            for epoch in range(1200):
                 log = classifier.train_classifier_step(kge_model, classifier, clf_opt, clf_iterator, args, generator=None, model_name=args.model)
                 if (epoch+1) % 200 == 0:
                     logging.info(log)
-                if epoch == 4000:
+                if epoch == 600:
                     clf_opt = torch.optim.Adam(classifier.parameters(), lr=clf_lr/10)
             clf_opt = torch.optim.Adam(classifier.parameters(), lr=clf_lr)
 
@@ -490,13 +490,13 @@ def main(args):
 
                     # score = embed_model.gamma.item() - score.sum(dim=2)
                     return score
-                if args.model == "RotatE":
-                    fake_score = classifier.forward(RotatE(head, relation, tail, "single", kge_model))
-                elif args.model == "DistMult":
-                    fake_score = classifier.forward(head*relation*tail)
+                # if args.model == "RotatE":
+                #     fake_score = classifier.forward(RotatE(head, relation, tail, "single", kge_model))
+                # elif args.model == "DistMult":
+                #     fake_score = classifier.forward(head*relation*tail)
                 all_weight = classifier.find_topK_triples(kge_model, classifier, train_iterator, clf_iterator,
                                                           GAN_iterator, soft=soft, model_name=args.model)
-                logging.info("fake percent %f in %d" % (fake_score.sum().item() / all_weight, all_weight))
+                # logging.info("fake percent %f in %d" % (fake_score.sum().item() / all_weight, all_weight))
                 logging.info("fake triples in classifier training %d / %d" % (
                     len(set(fake_triples).intersection(set(clf_iterator.dataloader_head.dataset.triples))),
                     len(clf_iterator.dataloader_head.dataset.triples)))
