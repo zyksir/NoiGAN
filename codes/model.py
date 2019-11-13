@@ -337,6 +337,63 @@ class KGEModel(nn.Module):
             ).view(batch_size, negative_sample_size, -1)
         return head, relation, tail
 
+    def generate(self, embed_model, pos, neg, mode, n_sample=1, temperature=1.0, train=True, model_name="TransE"):
+        batch_size, negative_sample_size = neg.size(0), neg.size(1)
+
+        scores = self.forward((pos, neg), mode=mode)
+        probs = torch.softmax(scores, dim=1)
+        row_idx = torch.arange(0, batch_size).type(torch.LongTensor).unsqueeze(1).expand(batch_size, n_sample)
+        sample_idx = torch.multinomial(probs, n_sample, replacement=True)
+        sample_neg = neg[row_idx, sample_idx.data.cpu()].view(batch_size, n_sample)
+        if train:
+            return pos, sample_neg, scores, sample_idx, row_idx
+        else:
+            return pos, sample_neg
+
+    def discriminate_step(self, embed_model, pos, neg, mode, clf_opt, model_name="TransE", args=None):
+        self.train()
+        clf_opt.zero_grad()
+
+        negative_score = self.forward((pos, neg), mode=mode)
+        positive_score = self.forward(pos)
+        if args.negative_adversarial_sampling:
+            # In self-adversarial sampling, we do not apply back-propagation on the sampling weight
+            negative_score = (F.softmax(negative_score * args.adversarial_temperature, dim=1).detach()
+                              * F.logsigmoid(-negative_score)).sum(dim=1)
+        else:
+            negative_score = F.logsigmoid(-negative_score).mean(dim=1)
+        positive_score = F.logsigmoid(positive_score).squeeze(dim=1)
+        positive_sample_loss = - positive_score.mean()
+        negative_sample_loss = - negative_score.mean()
+        loss = (positive_sample_loss + negative_sample_loss) / 2
+        self.zero_grad()
+        loss.backward()
+        clf_opt.step()
+        return loss, negative_sample_loss
+
+    @staticmethod
+    def train_GAN_step(generator, discriminator, opt_gen, opt_dis, train_iterator, epoch_reward, epoch_loss, avg_reward, args):
+        generator.train()
+        discriminator.train()
+
+        positive_sample, negative_sample, subsampling_weight, mode = next(train_iterator)
+        if args.cuda:
+            positive_sample = positive_sample.cuda()
+            negative_sample = negative_sample.cuda()
+
+        pos, neg, scores, sample_idx, row_idx = generator.generate(generator, positive_sample, negative_sample, mode)
+        loss, rewards = discriminator.discriminate_step(discriminator, pos, neg, mode, opt_dis, args=args)
+        epoch_reward += torch.sum(rewards)
+        epoch_loss += loss
+        rewards = rewards - avg_reward
+
+        generator.zero_grad()
+        log_probs = F.log_softmax(scores, dim=1)
+        reinforce_loss = torch.sum(Variable(rewards) * log_probs[row_idx.cuda(), sample_idx.data])
+        reinforce_loss.backward()
+        opt_gen.step()
+        return epoch_reward, epoch_loss, pos.size(0)
+
     @staticmethod
     def train_step(model, optimizer, train_iterator, args, generator=None):
         '''
@@ -580,6 +637,37 @@ def ComplEx(head, relation, tail, mode="single"):
     # score = score.sum(dim=2)
     return score
 
+def RotatE(head, relation, tail, mode, embed_model):
+    pi = 3.14159265358979323846
+
+    re_head, im_head = torch.chunk(head, 2, dim=2)
+    re_tail, im_tail = torch.chunk(tail, 2, dim=2)
+
+    # Make phases of relations uniformly distributed in [-pi, pi]
+
+    phase_relation = relation / (embed_model.embedding_range.item() / pi)
+
+    re_relation = torch.cos(phase_relation)
+    im_relation = torch.sin(phase_relation)
+
+    if mode == 'head-batch':
+        re_score = re_relation * re_tail + im_relation * im_tail
+        im_score = re_relation * im_tail - im_relation * re_tail
+        re_score = re_score - re_head
+        im_score = im_score - im_head
+    else:
+        re_score = re_head * re_relation - im_head * im_relation
+        im_score = re_head * im_relation + im_head * re_relation
+        re_score = re_score - re_tail
+        im_score = im_score - im_tail
+
+    score = torch.stack([re_score, im_score], dim=0)
+    score = score.norm(dim=0)
+
+    # score = embed_model.gamma.item() - score.sum(dim=2)
+    return score
+
+
 class SimpleNN(nn.Module):
     def __init__(self, input_dim, hidden_dim=10):
         super(SimpleNN, self).__init__()
@@ -667,6 +755,10 @@ class SimpleNN(nn.Module):
             return self.forward(h + r - t)
         elif model_name == "ComplEx":
             return self.forward(ComplEx(h, r, t))
+        elif model_name == "RotatE":
+            return self.forward(RotatE(h, r, t, "single", model))
+        elif model_name == "DistMult":
+            return self.forward(h*r*t)
         else:
             raise Exception("TransE or ComplEx??")
 
@@ -691,6 +783,12 @@ class SimpleNN(nn.Module):
         elif model_name == "ComplEx":
             pos_score = classifier(ComplEx(pos_head, pos_relation, pos_tail))
             neg_score = classifier(ComplEx(neg_head, neg_relation, neg_tail))
+        elif model_name == "DistMult":
+            pos_score = classifier(pos_head*pos_relation*pos_tail)
+            neg_score = classifier(neg_head*neg_relation*neg_tail)
+        elif model_name == "RotatE":
+            pos_score = classifier(RotatE(pos_head, pos_relation, pos_tail, mode, embed_model))
+            neg_score = classifier(RotatE(neg_head, neg_relation, neg_tail, mode, embed_model))
         else:
             raise Exception("TransE or ComplEx??")
         if args.cuda:
@@ -712,16 +810,8 @@ class SimpleNN(nn.Module):
 
         # pos_head, pos_relation, pos_tail = self.get_embedding(embed_model, pos)
         neg_head, neg_relation, neg_tail = self.get_embedding(embed_model, (pos, neg), mode=mode)
-        model_func = {'TransE': embed_model.TransE, 'DistMult': embed_model.DistMult, 'ComplEx': embed_model.ComplEx}
-        scores = model_func[embed_model.model_name](neg_head, neg_relation, neg_tail, mode="head-batch")
-        # if model_name == "TransE":
-        #     scores = self.forward(neg_head + neg_relation - neg_tail).view(batch_size,
-        #                                                                    negative_sample_size) / temperature
-        # elif model_name == "ComplEx":
-        #     scores = self.forward(ComplEx(neg_head, neg_relation, neg_tail)).view(batch_size,
-        #                                                                    negative_sample_size) / temperature
-        # else:
-        #     raise Exception("TransE or ComplEx??")
+        model_func = {'TransE': embed_model.TransE, 'RotatE':embed_model.RotatE, 'DistMult': embed_model.DistMult, 'ComplEx': embed_model.ComplEx}
+        scores = model_func[embed_model.model_name](neg_head, neg_relation, neg_tail, mode=mode)
         probs = torch.softmax(scores, dim=1)
         row_idx = torch.arange(0, batch_size).type(torch.LongTensor).unsqueeze(1).expand(batch_size, n_sample)
         sample_idx = torch.multinomial(probs, n_sample, replacement=True)
@@ -743,6 +833,12 @@ class SimpleNN(nn.Module):
         elif model_name == "ComplEx":
             negative_score = self.forward(ComplEx(neg_head, neg_relation, neg_tail))
             positive_score = self.forward(ComplEx(pos_head, pos_relation, pos_tail))
+        elif model_name == "DistMult":
+            positive_score = self.forward(pos_head*pos_relation*pos_tail)
+            negative_score = self.forward(neg_head*neg_relation*neg_tail)
+        elif model_name == "RotatE":
+            negative_score = self.forward(RotatE(neg_head, neg_relation, neg_tail, mode, embed_model))
+            positive_score = self.forward(RotatE(pos_head, pos_relation, pos_tail, mode, embed_model))
         else:
             raise Exception("TransE or ComplEx??")
         target = torch.cat([torch.ones(positive_score.size()), torch.zeros(negative_score.size())]).cuda()
@@ -793,12 +889,16 @@ class SimpleNN(nn.Module):
                 s = h + r - t
             elif model_name == "ComplEx":
                 s = ComplEx(h, r, t)
+            elif model_name == "DistMult":
+                s = h*r*t
+            elif model_name == "RotatE":
+                s = RotatE(h, r, t, "single", model)
             if soft:
                 weight = classifier.forward(s).view(-1).detach().cpu()
             else:
                 weight = (classifier.forward(s).view(-1).detach().cpu() > 0.5).type(torch.float32) + 0.00001
             all_weight += weight.sum().item()
-            score = (-torch.norm(h + r - t, p=1, dim=1)).view(-1).detach().cpu().tolist()
+            score = (-torch.norm(s, p=1, dim=1)).view(-1).detach().cpu().tolist()
             for x, triple in enumerate(train_iterator.dataloader_head.dataset.triples[i: j]):
                 train_iterator.dataloader_head.dataset.subsampling_weights[triple] = weight[x]
                 topk_heap.push((score[x], triple))

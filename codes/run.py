@@ -47,6 +47,7 @@ def parse_args(args=None):
 
     parser.add_argument('-n', '--negative_sample_size', default=128, type=int)
     parser.add_argument('-d', '--hidden_dim', default=500, type=int)
+    parser.add_argument('--gen_dim', default=250, type=int)
     parser.add_argument('-g', '--gamma', default=12.0, type=float)
     parser.add_argument('-adv', '--negative_adversarial_sampling', action='store_true')
     parser.add_argument('-a', '--adversarial_temperature', default=1.0, type=float)
@@ -59,6 +60,7 @@ def parse_args(args=None):
     parser.add_argument('-lr', '--learning_rate', default=0.0001, type=float)
     parser.add_argument('-cpu', '--cpu_num', default=10, type=int)
     parser.add_argument('-init', '--init_checkpoint', default=None, type=str)
+    parser.add_argument('--gen_init', default=None, type=str)
     parser.add_argument('-save', '--save_path', default=None, type=str)
     parser.add_argument('--max_steps', default=100000, type=int)
     parser.add_argument('--warm_up_steps', default=None, type=int)
@@ -267,7 +269,6 @@ def main(args):
     logging.info('Model Parameter Configuration:')
     for name, param in kge_model.named_parameters():
         logging.info('Parameter %s: %s, require_grad = %s' % (name, str(param.size()), str(param.requires_grad)))
-    # embed()
     if args.cuda:
         kge_model = kge_model.cuda()
 
@@ -298,6 +299,7 @@ def main(args):
         train_iterator = BidirectionalOneShotIterator(train_dataloader_head, train_dataloader_tail)
         classifier, generator = None, None
         if args.method == "clf":
+            args.gen_dim = args.hidden_dim
             clf_triples = random.sample(train_triples, len(train_triples)//10)
             clf_dataset_head = TrainDataset(clf_triples, nentity, nrelation,
                                             args.negative_sample_size, 'head-batch')
@@ -362,6 +364,22 @@ def main(args):
             clf_lr = 0.001 if "FB15k" in args.data_path else 0.01
             clf_opt = torch.optim.Adam(classifier.parameters(), lr=clf_lr)
             gen_opt = torch.optim.SGD(generator.parameters(), lr=0.0001)
+        elif args.method == "KBGAN":
+            generator = KGEModel(
+                model_name=args.model,
+                nentity=nentity,
+                nrelation=nrelation,
+                hidden_dim=args.gen_dim,
+                gamma=args.gamma,
+                double_entity_embedding=args.double_entity_embedding,
+                double_relation_embedding=args.double_relation_embedding
+            )
+            if args.cuda:
+                generator = generator.cuda()
+            if args.gen_init is not None:
+                checkpoint = torch.load(os.path.join(args.gen_init, 'checkpoint'))
+                generator.load_state_dict(checkpoint['model_state_dict'])
+            gen_opt = torch.optim.Adam(generator.parameters(), lr=args.learning_rate)
 
         # Set training configuration
         current_learning_rate = args.learning_rate
@@ -382,13 +400,11 @@ def main(args):
         kge_model.load_state_dict(checkpoint['model_state_dict'])
         if args.do_train:
             warm_up_steps = checkpoint['warm_up_steps']
-            # embed()
             logging.info("warm_up_steps = %d" % warm_up_steps)
             # if args.fake is None:
             #     init_step = checkpoint['step']
             #     current_learning_rate = checkpoint['current_learning_rate']
             #     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        # embed()
 # model = kge_model
 # positive_sample, negative_sample, subsampling_weight, mode = next(train_iterator)
 # positive_sample = positive_sample.cuda()
@@ -420,14 +436,13 @@ def main(args):
             logging.info("fake triples in classifier training %d / %d" % (
                 len(set(fake_triples).intersection(set(clf_iterator.dataloader_head.dataset.triples))),
                 len(clf_iterator.dataloader_head.dataset.triples)))
-            for epoch in range(3200):
+            for epoch in range(200):
                 log = classifier.train_classifier_step(kge_model, classifier, clf_opt, clf_iterator, args, generator=None, model_name=args.model)
                 if (epoch+1) % 200 == 0:
                     logging.info(log)
                 if epoch == 4000:
                     clf_opt = torch.optim.Adam(classifier.parameters(), lr=clf_lr/10)
             clf_opt = torch.optim.Adam(classifier.parameters(), lr=clf_lr)
-            # embed()
 
         training_logs = []
 
@@ -435,6 +450,7 @@ def main(args):
         logging.info(optimizer)
         best_hit10, best_hit10_step = 0, -1
         soft = False
+        epoch_reward, epoch_loss, avg_reward, log = 0, 0, 0, {}
         for step in range(init_step, args.max_steps):
             if args.method == "clf" and step % 5000 == 0:
                 if args.num == 1:
@@ -444,10 +460,43 @@ def main(args):
                 else:
                     soft = not soft
                 head, relation, tail = classifier.get_embedding(kge_model, fake)
-                # fake_score = classifier.forward(head + relation - tail)
+
+                def RotatE(head, relation, tail, mode, embed_model):
+                    pi = 3.14159265358979323846
+
+                    re_head, im_head = torch.chunk(head, 2, dim=2)
+                    re_tail, im_tail = torch.chunk(tail, 2, dim=2)
+
+                    # Make phases of relations uniformly distributed in [-pi, pi]
+
+                    phase_relation = relation / (embed_model.embedding_range.item() / pi)
+
+                    re_relation = torch.cos(phase_relation)
+                    im_relation = torch.sin(phase_relation)
+
+                    if mode == 'head-batch':
+                        re_score = re_relation * re_tail + im_relation * im_tail
+                        im_score = re_relation * im_tail - im_relation * re_tail
+                        re_score = re_score - re_head
+                        im_score = im_score - im_head
+                    else:
+                        re_score = re_head * re_relation - im_head * im_relation
+                        im_score = re_head * im_relation + im_head * re_relation
+                        re_score = re_score - re_tail
+                        im_score = im_score - im_tail
+
+                    score = torch.stack([re_score, im_score], dim=0)
+                    score = score.norm(dim=0)
+
+                    # score = embed_model.gamma.item() - score.sum(dim=2)
+                    return score
+                if args.model == "RotatE":
+                    fake_score = classifier.forward(RotatE(head, relation, tail, "single", kge_model))
+                elif args.model == "DistMult":
+                    fake_score = classifier.forward(head*relation*tail)
                 all_weight = classifier.find_topK_triples(kge_model, classifier, train_iterator, clf_iterator,
                                                           GAN_iterator, soft=soft, model_name=args.model)
-                # logging.info("fake percent %f in %d" % (fake_score.sum().item() / all_weight, all_weight))
+                logging.info("fake percent %f in %d" % (fake_score.sum().item() / all_weight, all_weight))
                 logging.info("fake triples in classifier training %d / %d" % (
                     len(set(fake_triples).intersection(set(clf_iterator.dataloader_head.dataset.triples))),
                     len(clf_iterator.dataloader_head.dataset.triples)))
@@ -461,7 +510,16 @@ def main(args):
                     if epoch % 100 == 0:
                         logging.info(log)
 
-            log = kge_model.train_step(kge_model, optimizer, train_iterator, args, generator=generator)
+            if step % 300 == 0 and step > 0 and args.method == "KBGAN":
+                avg_reward = epoch_reward / batch_num
+                epoch_reward, epoch_loss = 0, 0
+                logging.info('Training average reward at step %d: %f' % (step, avg_reward))
+                logging.info('Training average loss at step %d: %f' % (step, epoch_loss / batch_num))
+
+            if args.method == "KBGAN":
+                epoch_reward, epoch_loss, batch_num = kge_model.train_GAN_step(generator, kge_model, gen_opt, optimizer, train_iterator, epoch_reward, epoch_loss, avg_reward, args)
+            else:
+                log = kge_model.train_step(kge_model, optimizer, train_iterator, args, generator=generator)
 
             training_logs.append(log)
 
@@ -512,8 +570,8 @@ def main(args):
                 else:
                     logging.info("best hit@10 step at %d" % best_hit10_step)
 
-            if args.fake and args.method is None and step % 5000 == 0:
-                kge_model.find_topK_triples(kge_model, train_iterator, fake_triples)
+            # if args.fake and args.method is None and step % 5000 == 0:
+            #     kge_model.find_topK_triples(kge_model, train_iterator, fake_triples, )
 
         save_variable_list = {
             'step': step,

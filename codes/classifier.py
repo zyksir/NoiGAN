@@ -78,6 +78,21 @@ class TrainIterator(object):
             for data in dataloader:
                 yield data
 
+def ComplEx(head, relation, tail, mode="single"):
+    re_head, im_head = torch.chunk(head, 2, dim=1)
+    re_relation, im_relation = torch.chunk(relation, 2, dim=1)
+    re_tail, im_tail = torch.chunk(tail, 2, dim=1)
+
+    if mode == 'head-batch':
+        re_score = re_relation * re_tail + im_relation * im_tail
+        im_score = re_relation * im_tail - im_relation * re_tail
+        score = re_head * re_score + im_head * im_score
+    else:
+        re_score = re_head * re_relation - im_head * im_relation
+        im_score = re_head * im_relation + im_head * re_relation
+        score = re_score * re_tail + im_score * im_tail
+
+    return score
 
 class Classifier(nn.Module):
     def __init__(self, input_dim, hidden_dim=10, output_dim=1, n_layers=1):
@@ -85,19 +100,9 @@ class Classifier(nn.Module):
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_size = output_dim
-        # self.n_layers = n_layers
-        # self.conv = nn.Sequential(
-        #     nn.Conv1d(input_dim, hidden_dim, 1),
-        #     nn.AvgPool1d(2),
-        #     nn.Conv1d(hidden_dim, hidden_dim, 1),
-        #     nn.AvgPool1d(2)
-        # )
-        # self.gru = nn.GRU(hidden_dim, hidden_dim, n_layers, dropout=0.01)
-        #
-        # self.F1 = nn.Linear(hidden_dim, 1)
 
         self.F1 = nn.Linear(input_dim, hidden_dim)
-        self.dropout = nn.Dropout(0.1)
+        self.dropout = nn.Dropout(0.3)
         self.F2 = nn.Linear(hidden_dim, 1)
         # self.F3 = nn.Linear(10, 1)
 
@@ -107,27 +112,8 @@ class Classifier(nn.Module):
         :param negative_sample: batch_size * len * input_dim
         :return: batch_size
         '''
-        # batch_size = positive_sample.size(0)
-        # positive_sample, negative_sample = positive_sample.transpose(1, 2), negative_sample.transpose(1, 2)
-        # positive_score = self.conv(positive_sample)
-        # positive_score = positive_score.transpose(1, 2).transpose(0, 1) # (seq_len x batch_size x hidden_dim)
-        # positive_score = torch.tanh(positive_score)
-        # positive_score, hidden = self.gru(positive_score, None)
-        # conv_seq_len = positive_score.size(0)
-        # positive_score = hidden.view(conv_seq_len * batch_size, self.hidden_dim)
-        # positive_score = torch.sigmoid(self.F1(positive_score))
-        #
-        # batch_size = negative_sample.size(0)
-        # negative_score = self.conv(negative_sample)
-        # negative_score = negative_score.transpose(1, 2).transpose(0, 1)
-        # negative_score = torch.tanh(negative_score)
-        # negative_score, hidden = self.gru(negative_score, None)
-        # conv_seq_len = negative_score.size(0)
-        # negative_score = hidden.view(conv_seq_len * batch_size, self.hidden_dim)
-        # negative_score = torch.sigmoid(self.F1(negative_score))
-
-        positive_score = positive_sample[:, 0, :] + positive_sample[:, 1, :] - positive_sample[:, 2, :]
-        # positive_score = torch.cat([positive_score, positive_score, positive_score], -1)
+        positive_score = ComplEx(positive_sample[:, 0, :], positive_sample[:, 1, :], positive_sample[:, 2, :])
+        positive_score = torch.cat([positive_score, -positive_score], -1)
         # positive_score = torch.cat([positive_sample[:, 0, :], positive_sample[:, 1, :],positive_sample[:, 2, :]], -1)
         positive_score = self.F1(positive_score)
         positive_score = self.dropout(torch.tanh(positive_score))
@@ -135,11 +121,11 @@ class Classifier(nn.Module):
         # positive_score = self.F3(torch.tanh(positive_score))
         positive_score = torch.sigmoid(positive_score)
 
-        negative_score = negative_sample[:, 0, :] + negative_sample[:, 1, :] - negative_sample[:, 2, :]
-        # negative_score = torch.cat([negative_score, negative_score, negative_score], -1)
+        negative_score = ComplEx(negative_sample[:, 0, :], negative_sample[:, 1, :], negative_sample[:, 2, :])
+        negative_score = torch.cat([negative_score, -negative_score], -1)
         # negative_score = torch.cat([negative_sample[:, 0, :], negative_sample[:, 1, :], negative_sample[:, 2, :]], -1)
         negative_score = self.F1(negative_score)
-        negative_score = torch.tanh(negative_score)
+        negative_score = self.dropout(torch.tanh(negative_score))
         negative_score = self.F2(negative_score)
         # negative_score = self.F3(torch.tanh(negative_score))
         negative_score = torch.sigmoid(negative_score)
@@ -172,10 +158,8 @@ def get_true_head_and_tail(triples):
     return true_head, true_tail
 
 args = ARGS()
-args.model_path = "../models/TransE_wn18_fake10_256"
+args.model_path = "../models/ComplEx_wn18_fake10"
 negative_triples = pickle.load(open(os.path.join(args.data_path, "negative10.pkl"), "rb"))
-# train_triples = pickle.load(open(os.path.join(args.data_path, "TrueAndFake_triples.pkl"), "rb"))
-# TrueSome_triples = pickle.load(open(os.path.join(args.data_path, "TrueSome_triples.pkl"), "rb"))
 fake_triples = pickle.load(open(os.path.join(args.data_path, "fake10.pkl"), "rb"))
 true_all_triples = pickle.load(open(os.path.join(args.data_path, "TrueALL_triples.pkl"), "rb"))
 all_triples = true_all_triples + fake_triples
@@ -194,9 +178,9 @@ train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True, num_w
 train_iterator = TrainIterator(train_dataloader)
 
 
-model = Classifier(500, hidden_dim=10).cuda()
+model = Classifier(1000, hidden_dim=10).cuda()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-epochs, losses = 4000, []
+epochs, losses = 1000, []
 print_loss = 0
 for i in range(epochs):
     if i == 2000:
@@ -231,13 +215,14 @@ for h, r, t in fake_triples:
     neg.append(torch.cat([h, r, t], dim=0))
 
 neg = torch.stack(neg, dim=0).cuda()
-all_score, i, batch_size = 0, 0, len(fake_triples)
+all_score1, all_score2, i, batch_size = 0, 0, 0, len(fake_triples)
 while i < len(all_triples):
     j = min(i + batch_size, len(all_triples))
     pos_ = torch.stack(pos[i: j]).cuda()
     pos_score, neg_score = model(pos_, neg)
-    all_score += (pos_score>0.5).sum().item()
+    all_score1 += (pos_score>0.5).sum().item()
+    all_score2 += (pos_score).sum().item()
     i = j
-fake = (neg_score>0.5).sum().item()
-print(fake/all_score)
-print( (len(all_triples)-all_score-(len(fake_triples) - fake))/len(true_all_triples) )
+print((neg_score>0.5).sum().item()/all_score1)
+print((neg_score).sum().item()/all_score2)
+
