@@ -758,14 +758,14 @@ class SimpleNN(nn.Module):
         elif model_name == "RotatE":
             return self.forward(RotatE(h, r, t, "single", model))
         elif model_name == "DistMult":
-            return self.forward(h*r*t)
+            return self.forward(h * r * t)
         else:
             raise Exception("TransE or ComplEx??")
 
     @staticmethod
     def train_classifier_step(embed_model, classifier, clf_opt, train_iterator, args, generator, model_name="TransE"):
         embed_model.eval()
-        classifier.eval()
+        classifier.train()
         clf_opt.zero_grad()
 
         pos_sample, neg_sample, subsampling_weight, mode = next(train_iterator)
