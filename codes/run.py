@@ -21,6 +21,36 @@ from dataloader import TrainDataset
 from dataloader import BidirectionalOneShotIterator
 
 
+def RotatE(head, relation, tail, mode, embed_model):
+    pi = 3.14159265358979323846
+
+    re_head, im_head = torch.chunk(head, 2, dim=2)
+    re_tail, im_tail = torch.chunk(tail, 2, dim=2)
+
+    # Make phases of relations uniformly distributed in [-pi, pi]
+
+    phase_relation = relation / (embed_model.embedding_range.item() / pi)
+
+    re_relation = torch.cos(phase_relation)
+    im_relation = torch.sin(phase_relation)
+
+    if mode == 'head-batch':
+        re_score = re_relation * re_tail + im_relation * im_tail
+        im_score = re_relation * im_tail - im_relation * re_tail
+        re_score = re_score - re_head
+        im_score = im_score - im_head
+    else:
+        re_score = re_head * re_relation - im_head * im_relation
+        im_score = re_head * im_relation + im_head * re_relation
+        re_score = re_score - re_tail
+        im_score = im_score - im_tail
+
+    score = torch.stack([re_score, im_score], dim=0)
+    score = score.norm(dim=0)
+
+    # score = embed_model.gamma.item() - score.sum(dim=2)
+    return score
+
 def parse_args(args=None):
     parser = argparse.ArgumentParser(
         description='Training and Testing Knowledge Graph Embedding Models',
@@ -92,6 +122,10 @@ def override_config(args):
     args.double_relation_embedding = argparse_dict['double_relation_embedding']
     args.hidden_dim = argparse_dict['hidden_dim']
     args.test_batch_size = argparse_dict['test_batch_size']
+    args.fake = argparse_dict['fake']
+    if not args.do_train:
+        args.method = argparse_dict['method']
+        args.save_path = argparse_dict['save_path']
 
 
 def save_model(model, optimizer, save_variable_list, args, classifier=None, generator=None, best=False):
@@ -272,125 +306,125 @@ def main(args):
     if args.cuda:
         kge_model = kge_model.cuda()
 
-    if args.do_train:
-        # Set training dataloader iterator
-        train_dataset_head = TrainDataset(train_triples, nentity, nrelation, args.negative_sample_size, 'head-batch')
-        train_dataset_tail = TrainDataset(train_triples, nentity, nrelation, args.negative_sample_size, 'tail-batch')
-        for triple in tqdm(train_dataset_head.triples, total=len(train_dataset_head.triples)):
-            train_dataset_head.subsampling_weights[triple] = torch.FloatTensor([1.0])
-        train_dataset_tail.subsampling_weights = train_dataset_head.subsampling_weights
+    # Set training dataloader iterator
+    train_dataset_head = TrainDataset(train_triples, nentity, nrelation, args.negative_sample_size, 'head-batch')
+    train_dataset_tail = TrainDataset(train_triples, nentity, nrelation, args.negative_sample_size, 'tail-batch')
+    for triple in tqdm(train_dataset_head.triples, total=len(train_dataset_head.triples)):
+        train_dataset_head.subsampling_weights[triple] = torch.FloatTensor([1.0])
+    train_dataset_tail.subsampling_weights = train_dataset_head.subsampling_weights
 
-        train_dataloader_head = DataLoader(
-            train_dataset_head,
+    train_dataloader_head = DataLoader(
+        train_dataset_head,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=max(1, args.cpu_num // 2),
+        collate_fn=TrainDataset.collate_fn
+    )
+
+    train_dataloader_tail = DataLoader(
+        train_dataset_tail,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=max(1, args.cpu_num // 2),
+        collate_fn=TrainDataset.collate_fn
+    )
+
+    train_iterator = BidirectionalOneShotIterator(train_dataloader_head, train_dataloader_tail)
+    classifier, generator = None, None
+    if args.method == "clf" or args.method is None:
+        args.gen_dim = args.hidden_dim
+        clf_triples = random.sample(train_triples, len(train_triples)//10)
+        #logging.info("zykzykzykzykzykzyk")
+        clf_dataset_head = TrainDataset(clf_triples, nentity, nrelation,
+                                        args.negative_sample_size, 'head-batch')
+        clf_dataset_tail = TrainDataset(clf_triples, nentity, nrelation,
+                                        args.negative_sample_size, 'tail-batch')
+        clf_dataset_head.true_head, clf_dataset_head.true_tail = train_dataset_head.true_head, train_dataset_head.true_tail
+        clf_dataset_tail.true_head, clf_dataset_tail.true_tail = train_dataset_tail.true_head, train_dataset_tail.true_tail
+        clf_dataset_head.subsampling_weights = train_dataset_head.subsampling_weights
+        clf_dataset_tail.subsampling_weights = train_dataset_head.subsampling_weights
+        clf_dataloader_head = DataLoader(
+            clf_dataset_head,
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=max(1, args.cpu_num // 2),
             collate_fn=TrainDataset.collate_fn
         )
 
-        train_dataloader_tail = DataLoader(
-            train_dataset_tail,
+        clf_dataloader_tail = DataLoader(
+            clf_dataset_tail,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=max(1, args.cpu_num // 2),
+            collate_fn=TrainDataset.collate_fn
+        )
+        clf_iterator = BidirectionalOneShotIterator(clf_dataloader_head, clf_dataloader_tail)
+
+        GAN_dataset_head = TrainDataset(clf_triples, nentity, nrelation,
+                                        args.negative_sample_size, 'head-batch')
+        GAN_dataset_tail = TrainDataset(clf_triples, nentity, nrelation,
+                                        args.negative_sample_size, 'tail-batch')
+        GAN_dataset_head.true_head, GAN_dataset_head.true_tail = train_dataset_head.true_head, train_dataset_head.true_tail
+        GAN_dataset_tail.true_head, GAN_dataset_tail.true_tail = train_dataset_tail.true_head, train_dataset_tail.true_tail
+        GAN_dataset_head.subsampling_weights = train_dataset_head.subsampling_weights
+        GAN_dataset_tail.subsampling_weights = train_dataset_head.subsampling_weights
+        GAN_dataloader_head = DataLoader(
+            GAN_dataset_head,
             batch_size=args.batch_size,
             shuffle=True,
             num_workers=max(1, args.cpu_num // 2),
             collate_fn=TrainDataset.collate_fn
         )
 
-        train_iterator = BidirectionalOneShotIterator(train_dataloader_head, train_dataloader_tail)
-        classifier, generator = None, None
-        if args.method == "clf":
-            args.gen_dim = args.hidden_dim
-            clf_triples = random.sample(train_triples, len(train_triples)//10)
-            clf_dataset_head = TrainDataset(clf_triples, nentity, nrelation,
-                                            args.negative_sample_size, 'head-batch')
-            clf_dataset_tail = TrainDataset(clf_triples, nentity, nrelation,
-                                            args.negative_sample_size, 'tail-batch')
-            clf_dataset_head.true_head, clf_dataset_head.true_tail = train_dataset_head.true_head, train_dataset_head.true_tail
-            clf_dataset_tail.true_head, clf_dataset_tail.true_tail = train_dataset_tail.true_head, train_dataset_tail.true_tail
-            clf_dataset_head.subsampling_weights = train_dataset_head.subsampling_weights
-            clf_dataset_tail.subsampling_weights = train_dataset_head.subsampling_weights
-            clf_dataloader_head = DataLoader(
-                clf_dataset_head,
-                batch_size=args.batch_size,
-                shuffle=True,
-                num_workers=max(1, args.cpu_num // 2),
-                collate_fn=TrainDataset.collate_fn
-            )
-
-            clf_dataloader_tail = DataLoader(
-                clf_dataset_tail,
-                batch_size=args.batch_size,
-                shuffle=True,
-                num_workers=max(1, args.cpu_num // 2),
-                collate_fn=TrainDataset.collate_fn
-            )
-            clf_iterator = BidirectionalOneShotIterator(clf_dataloader_head, clf_dataloader_tail)
-
-            GAN_dataset_head = TrainDataset(clf_triples, nentity, nrelation,
-                                            args.negative_sample_size, 'head-batch')
-            GAN_dataset_tail = TrainDataset(clf_triples, nentity, nrelation,
-                                            args.negative_sample_size, 'tail-batch')
-            GAN_dataset_head.true_head, GAN_dataset_head.true_tail = train_dataset_head.true_head, train_dataset_head.true_tail
-            GAN_dataset_tail.true_head, GAN_dataset_tail.true_tail = train_dataset_tail.true_head, train_dataset_tail.true_tail
-            GAN_dataset_head.subsampling_weights = train_dataset_head.subsampling_weights
-            GAN_dataset_tail.subsampling_weights = train_dataset_head.subsampling_weights
-            GAN_dataloader_head = DataLoader(
-                GAN_dataset_head,
-                batch_size=args.batch_size,
-                shuffle=True,
-                num_workers=max(1, args.cpu_num // 2),
-                collate_fn=TrainDataset.collate_fn
-            )
-
-            GAN_dataloader_tail = DataLoader(
-                GAN_dataset_tail,
-                batch_size=args.batch_size,
-                shuffle=True,
-                num_workers=max(1, args.cpu_num // 2),
-                collate_fn=TrainDataset.collate_fn
-            )
-            GAN_iterator = BidirectionalOneShotIterator(GAN_dataloader_head, GAN_dataloader_tail)
-
-            # if args.double_entity_embedding:
-            #     classifier = SimpleNN(input_dim=args.hidden_dim*2, hidden_dim=10)
-            #     generator = SimpleNN(input_dim=args.hidden_dim*2, hidden_dim=10)
-            # else:
-            classifier = SimpleNN(input_dim=args.hidden_dim, hidden_dim=10)
-            generator = SimpleNN(input_dim=args.hidden_dim, hidden_dim=10)
-
-            if args.cuda:
-                classifier = classifier.cuda()
-                generator = generator.cuda()
-            clf_lr = 0.001 if "FB15k" in args.data_path else 0.01
-            clf_opt = torch.optim.Adam(classifier.parameters(), lr=clf_lr)
-            gen_opt = torch.optim.SGD(generator.parameters(), lr=0.0001)
-        elif args.method == "KBGAN":
-            generator = KGEModel(
-                model_name=args.model,
-                nentity=nentity,
-                nrelation=nrelation,
-                hidden_dim=args.gen_dim,
-                gamma=args.gamma,
-                double_entity_embedding=args.double_entity_embedding,
-                double_relation_embedding=args.double_relation_embedding
-            )
-            if args.cuda:
-                generator = generator.cuda()
-            if args.gen_init is not None:
-                checkpoint = torch.load(os.path.join(args.gen_init, 'checkpoint'))
-                generator.load_state_dict(checkpoint['model_state_dict'])
-            gen_opt = torch.optim.Adam(generator.parameters(), lr=args.learning_rate)
-
-        # Set training configuration
-        current_learning_rate = args.learning_rate
-        optimizer = torch.optim.Adam(
-            filter(lambda p: p.requires_grad, kge_model.parameters()),
-            lr=current_learning_rate
+        GAN_dataloader_tail = DataLoader(
+            GAN_dataset_tail,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=max(1, args.cpu_num // 2),
+            collate_fn=TrainDataset.collate_fn
         )
-        if args.warm_up_steps:
-            warm_up_steps = args.warm_up_steps
-        else:
-            warm_up_steps = args.max_steps // 2
+        GAN_iterator = BidirectionalOneShotIterator(GAN_dataloader_head, GAN_dataloader_tail)
+
+        # if args.double_entity_embedding:
+        #     classifier = SimpleNN(input_dim=args.hidden_dim, hidden_dim=5)
+        #     generator = SimpleNN(input_dim=args.hidden_dim, hidden_dim=5)
+        # else:
+        classifier = SimpleNN(input_dim=args.hidden_dim, hidden_dim=2)
+        generator = SimpleNN(input_dim=args.hidden_dim, hidden_dim=2)
+
+        if args.cuda:
+            classifier = classifier.cuda()
+            generator = generator.cuda()
+        clf_lr = 0.005 # if "FB15k" in args.data_path else 0.01
+        clf_opt = torch.optim.Adam(classifier.parameters(), lr=clf_lr)
+        gen_opt = torch.optim.SGD(generator.parameters(), lr=0.0001)
+    elif args.method == "KBGAN":
+        generator = KGEModel(
+            model_name=args.model,
+            nentity=nentity,
+            nrelation=nrelation,
+            hidden_dim=args.gen_dim,
+            gamma=args.gamma,
+            double_entity_embedding=args.double_entity_embedding,
+            double_relation_embedding=args.double_relation_embedding
+        )
+        if args.cuda:
+            generator = generator.cuda()
+        # if args.gen_init is not None:
+        #     checkpoint = torch.load(os.path.join(args.gen_init, 'checkpoint'))
+        #     generator.load_state_dict(checkpoint['model_state_dict'])
+        gen_opt = torch.optim.Adam(generator.parameters(), lr=args.learning_rate)
+
+    # Set training configuration
+    current_learning_rate = args.learning_rate
+    optimizer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, kge_model.parameters()),
+        lr=current_learning_rate
+    )
+    if args.warm_up_steps:
+        warm_up_steps = args.warm_up_steps
+    else:
+        warm_up_steps = args.max_steps # // 2
 
     if args.init_checkpoint:
         # Restore model from checkpoint directory
@@ -398,6 +432,9 @@ def main(args):
         checkpoint = torch.load(os.path.join(args.init_checkpoint, 'checkpoint'))
         init_step = 0
         kge_model.load_state_dict(checkpoint['model_state_dict'])
+        # if 'classifier_state_dict' in checkpoint:
+        #     logging.info("init classifier")
+        #     classifier.load_state_dict(checkpoint['classifier_state_dict'])
         if args.do_train:
             warm_up_steps = checkpoint['warm_up_steps']
             logging.info("warm_up_steps = %d" % warm_up_steps)
@@ -405,12 +442,8 @@ def main(args):
             #     init_step = checkpoint['step']
             #     current_learning_rate = checkpoint['current_learning_rate']
             #     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-# model = kge_model
-# positive_sample, negative_sample, subsampling_weight, mode = next(train_iterator)
-# positive_sample = positive_sample.cuda()
-# negative_sample = negative_sample.cuda()
-# negative_score = model((positive_sample, negative_sample), mode=mode)
-# positive_score = model(positive_sample)
+        else:
+            current_learning_rate = args.learning_rate
     else:
         logging.info('Ramdomly Initializing %s Model...' % args.model)
         init_step = 0
@@ -429,7 +462,6 @@ def main(args):
         logging.info('adversarial_temperature = %f' % args.adversarial_temperature)
 
     # Set valid  as it would be evaluated during training
-
     if args.do_train:
         if args.method == "clf" and args.init_checkpoint:
             # classifier.find_topK_triples(kge_model, classifier, train_iterator, clf_iterator, GAN_iterator)
@@ -440,9 +472,11 @@ def main(args):
                 log = classifier.train_classifier_step(kge_model, classifier, clf_opt, clf_iterator, args, generator=None, model_name=args.model)
                 if (epoch+1) % 200 == 0:
                     logging.info(log)
-                if epoch == 600:
+                if epoch == 4000:
                     clf_opt = torch.optim.Adam(classifier.parameters(), lr=clf_lr/10)
             clf_opt = torch.optim.Adam(classifier.parameters(), lr=clf_lr)
+            # embed()
+
 
         training_logs = []
 
@@ -452,7 +486,7 @@ def main(args):
         soft = False
         epoch_reward, epoch_loss, avg_reward, log = 0, 0, 0, {}
         for step in range(init_step, args.max_steps):
-            if args.method == "clf" and step % 5000 == 0:
+            if args.method == "clf" and step % 10001 == 0:
                 if args.num == 1:
                     soft = True
                 elif args.num == 1000:
@@ -460,53 +494,26 @@ def main(args):
                 else:
                     soft = not soft
                 head, relation, tail = classifier.get_embedding(kge_model, fake)
-
-                def RotatE(head, relation, tail, mode, embed_model):
-                    pi = 3.14159265358979323846
-
-                    re_head, im_head = torch.chunk(head, 2, dim=2)
-                    re_tail, im_tail = torch.chunk(tail, 2, dim=2)
-
-                    # Make phases of relations uniformly distributed in [-pi, pi]
-
-                    phase_relation = relation / (embed_model.embedding_range.item() / pi)
-
-                    re_relation = torch.cos(phase_relation)
-                    im_relation = torch.sin(phase_relation)
-
-                    if mode == 'head-batch':
-                        re_score = re_relation * re_tail + im_relation * im_tail
-                        im_score = re_relation * im_tail - im_relation * re_tail
-                        re_score = re_score - re_head
-                        im_score = im_score - im_head
-                    else:
-                        re_score = re_head * re_relation - im_head * im_relation
-                        im_score = re_head * im_relation + im_head * re_relation
-                        re_score = re_score - re_tail
-                        im_score = im_score - im_tail
-
-                    score = torch.stack([re_score, im_score], dim=0)
-                    score = score.norm(dim=0)
-
-                    # score = embed_model.gamma.item() - score.sum(dim=2)
-                    return score
-                # if args.model == "RotatE":
-                #     fake_score = classifier.forward(RotatE(head, relation, tail, "single", kge_model))
-                # elif args.model == "DistMult":
-                #     fake_score = classifier.forward(head*relation*tail)
+                if args.model == "RotatE":
+                    fake_score = classifier.forward(RotatE(head, relation, tail, "single", kge_model))
+                elif args.model == "DistMult":
+                    fake_score = classifier.forward(head * relation * tail)
+                elif args.model == "TransE":
+                    fake_score = classifier.forward(head + relation - tail)
                 all_weight = classifier.find_topK_triples(kge_model, classifier, train_iterator, clf_iterator,
                                                           GAN_iterator, soft=soft, model_name=args.model)
-                # logging.info("fake percent %f in %d" % (fake_score.sum().item() / all_weight, all_weight))
+                logging.info("fake percent %f in %d" % (fake_score.sum().item() / all_weight, all_weight))
                 logging.info("fake triples in classifier training %d / %d" % (
                     len(set(fake_triples).intersection(set(clf_iterator.dataloader_head.dataset.triples))),
                     len(clf_iterator.dataloader_head.dataset.triples)))
 
                 epoch_reward, epoch_loss, avg_reward = 0, 0, 0
-                for epoch in tqdm(range(1000)):
+                for epoch in tqdm(range(0)):
                     classifier.train_GAN_step(kge_model, generator, classifier, gen_opt, clf_opt, GAN_iterator, epoch_reward, epoch_loss, avg_reward, args, model_name=args.model)
 
-                for epoch in range(1000):
-                    log = classifier.train_classifier_step(kge_model, classifier, clf_opt, clf_iterator, args, generator, model_name=args.model)
+                clf_train_num = 200
+                for epoch in range(clf_train_num):
+                    log = classifier.train_classifier_step(kge_model, classifier, clf_opt, clf_iterator, args, generator=None, model_name=args.model)
                     if epoch % 100 == 0:
                         logging.info(log)
 
@@ -569,9 +576,21 @@ def main(args):
                                classifier=classifier, generator=generator, best=True)
                 else:
                     logging.info("best hit@10 step at %d" % best_hit10_step)
-
-            # if args.fake and args.method is None and step % 5000 == 0:
-            #     kge_model.find_topK_triples(kge_model, train_iterator, fake_triples, )
+                # if args.method is None and args.fake is not None and args.model == "RotatE":
+                #     classifier = SimpleNN(input_dim=args.hidden_dim, hidden_dim=5)
+                #     if args.cuda:
+                #         classifier = classifier.cuda()
+                #     clf_opt = torch.optim.Adam(classifier.parameters(), lr=0.005)
+                #     for zyk in range(2500):
+                #         log = classifier.train_classifier_step(kge_model, classifier, clf_opt, clf_iterator, args,
+                #                                                generator=None, model_name=args.model)
+                #         if (zyk + 1) % 200 == 0:
+                #             logging.info(log)
+                #     head, relation, tail = classifier.get_embedding(kge_model, fake)
+                #     fake_score = classifier.forward(RotatE(head, relation, tail, "single", kge_model))
+                #     all_weight = classifier.find_topK_triples(kge_model, classifier, train_iterator, clf_iterator,
+                #                                               GAN_iterator, soft=False, model_name=args.model)
+                #     logging.info("fake percent %f in %d" % (fake_score.sum().item() / all_weight, all_weight))
 
         save_variable_list = {
             'step': step,
@@ -582,8 +601,8 @@ def main(args):
             save_variable_list["confidence"] = train_iterator.dataloader_head.dataset.subsampling_weights
         save_model(kge_model, optimizer, save_variable_list, args, classifier=classifier, generator=generator)
 
-    if best_hit10_step > 0:
-        kge_model.load_state_dict(best_model)
+        if best_hit10_step > 0:
+            kge_model.load_state_dict(best_model)
 
     if args.do_valid:
         logging.info('Evaluating on Valid Dataset...')
@@ -594,6 +613,49 @@ def main(args):
         logging.info('Evaluating on Test Dataset...')
         metrics = kge_model.test_step(kge_model, test_triples, all_true_triples, args)
         log_metrics('Test', step, metrics)
+        if classifier is not None:
+            classifier.find_topK_triples(kge_model, classifier, train_iterator, clf_iterator,
+                                         GAN_iterator, soft=True, model_name=args.model)
+            torch.save(train_iterator.dataloader_head.dataset.subsampling_weights,
+                       os.path.join(args.save_path, 'weight'))
+        # else:
+        #     for triple in tqdm(train_iterator.dataloader_head.dataset.triples):
+        #         triple = torch.LongTensor(triple).unsqueeze(0).cuda()
+        #         score = kge_model(triple).cpu().view(-1)
+        #         import math
+        #         train_iterator.dataloader_head.dataset.subsampling_weights[triple] = 1 - (kge_model.gamma.item() - score) / (3 * math.sqrt(args.hidden_dim))
+            true_triples = set(train_triples) - set(fake_triples)
+            scores, label = [], []
+            for triple in true_triples:
+                if not (triple == (0, 0, 0)):
+                    scores.append(train_iterator.dataloader_head.dataset.subsampling_weights[triple].item())
+                    label.append(1)
+            for triple in fake_triples:
+                if not (triple == (0, 0, 0)):
+                    scores.append(train_iterator.dataloader_head.dataset.subsampling_weights[triple].item())
+                    label.append(0)
+            scores, label = np.array(scores), np.array(label)
+            from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
+            p = precision_score(label, scores > 0.5)
+            r = recall_score(label, scores > 0.5)
+            f1 = f1_score(label, scores > 0.5)
+            auc = roc_auc_score(label, scores > 0.5)
+            logging.info(f"""
+            precision = {p} 
+            recall = {r}    
+            f1 score = {f1} 
+            auc score = {auc}   
+            """)
+            p = precision_score(1 - label, scores < 0.5)
+            r = recall_score(1 - label, scores < 0.5)
+            f1 = f1_score(1 - label, scores < 0.5)
+            auc = roc_auc_score(1 - label, scores < 0.5)
+            logging.info(f"""
+                    precision = {p} 
+                    recall = {r}    
+                    f1 score = {f1} 
+                    auc score = {auc}   
+                    """)
 
     if args.evaluate_train:
         logging.info('Evaluating on Training Dataset...')
