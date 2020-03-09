@@ -12,16 +12,16 @@ from sklearn.metrics import accuracy_score
 class ARGS():
     def __init__(self):
         self.cuda = True
-        self.nentity = 14951
-        self.nrelation = 1345
+        self.nentity = 123182
+        self.nrelation = 37
         self.countries = False
         self.test_batch_size = 16
         self.batch_size = 1024
         self.cpu_num = 8
         self.test_log_steps = 1000
         self.negative_sample_size = 256
-        self.data_path = "../data/wn18"
-        self.model_path = "../models/TransE_wn18_fake20_256"
+        self.hidden_dim = 250
+        self.data_path = "../data/YAGO3-10"
 
 class TrainDataset(Dataset):
 
@@ -42,13 +42,15 @@ class TrainDataset(Dataset):
         positive_sample, negative_sample = [], []
         h = self.entity_embedding[h].view(1, -1)
         r = self.relation_embedding[r].view(1, -1)
+        r_ = r.repeat(1, 2)
         t = self.entity_embedding[t].view(1, -1)
-        positive_sample = torch.cat([h, r, t], dim=0)
+        positive_sample = torch.cat([h, r_, t], dim=0)
         for h, r, t in negative_samples:
             h = self.entity_embedding[h]
             r = self.relation_embedding[r]
+            r_ = r.repeat(2)
             t = self.entity_embedding[t]
-            negative_sample.append(torch.stack([h, r, t], dim=0))
+            negative_sample.append(torch.stack([h, r_, t], dim=0))
         positive_sample = torch.FloatTensor(positive_sample)
         negative_sample = torch.stack(negative_sample, dim=0)
         return positive_sample, negative_sample
@@ -78,21 +80,46 @@ class TrainIterator(object):
             for data in dataloader:
                 yield data
 
-def ComplEx(head, relation, tail, mode="single"):
+def RotatE(head, relation, tail, mode="simple"):
+    pi = 3.14159265358979323846
+
     re_head, im_head = torch.chunk(head, 2, dim=1)
-    re_relation, im_relation = torch.chunk(relation, 2, dim=1)
     re_tail, im_tail = torch.chunk(tail, 2, dim=1)
+
+    # Make phases of relations uniformly distributed in [-pi, pi]
+    embed_model = (24+2) / args.hidden_dim
+    phase_relation = relation / (embed_model / pi)
+
+    re_relation = torch.cos(phase_relation)
+    im_relation = torch.sin(phase_relation)
 
     if mode == 'head-batch':
         re_score = re_relation * re_tail + im_relation * im_tail
         im_score = re_relation * im_tail - im_relation * re_tail
-        score = re_head * re_score + im_head * im_score
+        re_score = re_score - re_head
+        im_score = im_score - im_head
     else:
         re_score = re_head * re_relation - im_head * im_relation
         im_score = re_head * im_relation + im_head * re_relation
-        score = re_score * re_tail + im_score * im_tail
+        re_score = re_score - re_tail
+        im_score = im_score - im_tail
 
+    score = torch.stack([re_score, im_score], dim=0)
+    score = score.norm(dim=0)
+
+    # score = embed_model.gamma.item() - score.sum(dim=2)
     return score
+
+def read_triple(file_path, entity2id, relation2id):
+    '''
+    Read triples and map them into ids.
+    '''
+    triples = []
+    with open(file_path) as fin:
+        for line in fin:
+            h, r, t = line.strip().split('\t')
+            triples.append((entity2id[h], relation2id[r], entity2id[t]))
+    return triples
 
 class Classifier(nn.Module):
     def __init__(self, input_dim, hidden_dim=10, output_dim=1, n_layers=1):
@@ -112,18 +139,16 @@ class Classifier(nn.Module):
         :param negative_sample: batch_size * len * input_dim
         :return: batch_size
         '''
-        positive_score = ComplEx(positive_sample[:, 0, :], positive_sample[:, 1, :], positive_sample[:, 2, :])
+        positive_score = RotatE(positive_sample[:, 0, :], positive_sample[:, 1, :args.hidden_dim], positive_sample[:, 2, :])
         positive_score = torch.cat([positive_score, -positive_score], -1)
-        # positive_score = torch.cat([positive_sample[:, 0, :], positive_sample[:, 1, :],positive_sample[:, 2, :]], -1)
         positive_score = self.F1(positive_score)
         positive_score = self.dropout(torch.tanh(positive_score))
         positive_score = self.F2(positive_score)
         # positive_score = self.F3(torch.tanh(positive_score))
         positive_score = torch.sigmoid(positive_score)
 
-        negative_score = ComplEx(negative_sample[:, 0, :], negative_sample[:, 1, :], negative_sample[:, 2, :])
+        negative_score = RotatE(negative_sample[:, 0, :], negative_sample[:, 1, :args.hidden_dim], negative_sample[:, 2, :])
         negative_score = torch.cat([negative_score, -negative_score], -1)
-        # negative_score = torch.cat([negative_sample[:, 0, :], negative_sample[:, 1, :], negative_sample[:, 2, :]], -1)
         negative_score = self.F1(negative_score)
         negative_score = self.dropout(torch.tanh(negative_score))
         negative_score = self.F2(negative_score)
@@ -158,10 +183,21 @@ def get_true_head_and_tail(triples):
     return true_head, true_tail
 
 args = ARGS()
-args.model_path = "../models/ComplEx_wn18_fake10"
-negative_triples = pickle.load(open(os.path.join(args.data_path, "negative10.pkl"), "rb"))
-fake_triples = pickle.load(open(os.path.join(args.data_path, "fake10.pkl"), "rb"))
-true_all_triples = pickle.load(open(os.path.join(args.data_path, "TrueALL_triples.pkl"), "rb"))
+args.model_path = "../models/RotatE_YAGO3-10_fake40_5"
+negative_triples = pickle.load(open(os.path.join(args.data_path, "fakePath70.pkl"), "rb"))
+fake_triples = pickle.load(open(os.path.join(args.data_path, "fake40.pkl"), "rb"))
+negative_triples = list(set(negative_triples) - set(fake_triples))
+with open(os.path.join(args.data_path, 'entities.dict')) as fin:
+    entity2id = dict()
+    for line in fin:
+        eid, entity = line.strip().split('\t')
+        entity2id[entity] = int(eid)
+with open(os.path.join(args.data_path, 'relations.dict')) as fin:
+    relation2id = dict()
+    for line in fin:
+        rid, relation = line.strip().split('\t')
+        relation2id[relation] = int(rid)
+true_all_triples = read_triple(os.path.join(args.data_path, 'train.txt'), entity2id, relation2id)
 all_triples = true_all_triples + fake_triples
 true_head, true_tail = get_true_head_and_tail(all_triples)
 
@@ -178,7 +214,7 @@ train_dataloader = DataLoader(train_dataset, batch_size=128, shuffle=True, num_w
 train_iterator = TrainIterator(train_dataloader)
 
 
-model = Classifier(1000, hidden_dim=10).cuda()
+model = Classifier(args.hidden_dim * 2, hidden_dim=2).cuda()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 epochs, losses = 1000, []
 print_loss = 0
@@ -205,12 +241,14 @@ pos, neg = [], []
 for h, r, t in tqdm(all_triples):
     h = entity_embedding[h].view(1, -1)
     r = relation_embedding[r].view(1, -1)
+    r = r.repeat(1, 2)
     t = entity_embedding[t].view(1, -1)
     pos.append(torch.cat([h, r, t], dim=0))
 
 for h, r, t in fake_triples:
     h = entity_embedding[h].view(1, -1)
     r = relation_embedding[r].view(1, -1)
+    r = r.repeat(1, 2)
     t = entity_embedding[t].view(1, -1)
     neg.append(torch.cat([h, r, t], dim=0))
 

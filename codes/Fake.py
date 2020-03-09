@@ -202,3 +202,15 @@ generate_fakePath_data(data_path='../data/FB15k-237', num=40)
 #     with open(os.path.join(data_path, "fakeRand%d.pkl" % num), "wb") as f:
 #         pickle.dump(fake_triples, f)
 #     print(data_path)
+
+
+for epoch in range(1200):
+    log = classifier.train_classifier_step(kge_model, classifier, clf_opt, clf_iterator, args, generator=None,
+                                           model_name=args.model)
+head, relation, tail = classifier.get_embedding(kge_model, fake)
+all_weight = classifier.find_topK_triples(kge_model, classifier, train_iterator, clf_iterator,
+                                          GAN_iterator, soft=False, model_name=args.model)
+logging.info("fake percent %f in %d" % (fake_score.sum().item() / all_weight, all_weight))
+logging.info("fake triples in classifier training %d / %d" % (
+    len(set(fake_triples).intersection(set(clf_iterator.dataloader_head.dataset.triples))),
+    len(clf_iterator.dataloader_head.dataset.triples)))

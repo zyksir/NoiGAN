@@ -24,7 +24,7 @@ from dataloader import BidirectionalOneShotIterator
 def RotatE(head, relation, tail, mode, embed_model):
     pi = 3.14159265358979323846
 
-    re_head, im_head = torch.chunk(head, 2, dim=2)
+    re_head, im_head = torch.chunk(head, 2, dim=2)  # (batch_size, negative_sample_size, hidden_dim)
     re_tail, im_tail = torch.chunk(tail, 2, dim=2)
 
     # Make phases of relations uniformly distributed in [-pi, pi]
@@ -45,7 +45,7 @@ def RotatE(head, relation, tail, mode, embed_model):
         re_score = re_score - re_tail
         im_score = im_score - im_tail
 
-    score = torch.stack([re_score, im_score], dim=0)
+    score = torch.stack([re_score, im_score], dim=0)  # (batch_size, negative_sample_size, hidden_dim)
     score = score.norm(dim=0)
 
     # score = embed_model.gamma.item() - score.sum(dim=2)
@@ -581,7 +581,7 @@ def main(args):
                 #     if args.cuda:
                 #         classifier = classifier.cuda()
                 #     clf_opt = torch.optim.Adam(classifier.parameters(), lr=0.005)
-                #     for zyk in range(2500):
+                #     for zyk in range(1000):
                 #         log = classifier.train_classifier_step(kge_model, classifier, clf_opt, clf_iterator, args,
                 #                                                generator=None, model_name=args.model)
                 #         if (zyk + 1) % 200 == 0:
@@ -610,20 +610,14 @@ def main(args):
         log_metrics('Valid', step, metrics)
 
     if args.do_test:
-        logging.info('Evaluating on Test Dataset...')
-        metrics = kge_model.test_step(kge_model, test_triples, all_true_triples, args)
-        log_metrics('Test', step, metrics)
-        if classifier is not None:
+        # logging.info('Evaluating on Test Dataset...')
+        # metrics = kge_model.test_step(kge_model, test_triples, all_true_triples, args)
+        # log_metrics('Test', step, metrics)
+        if args.method is not None:
             classifier.find_topK_triples(kge_model, classifier, train_iterator, clf_iterator,
                                          GAN_iterator, soft=True, model_name=args.model)
             torch.save(train_iterator.dataloader_head.dataset.subsampling_weights,
                        os.path.join(args.save_path, 'weight'))
-        # else:
-        #     for triple in tqdm(train_iterator.dataloader_head.dataset.triples):
-        #         triple = torch.LongTensor(triple).unsqueeze(0).cuda()
-        #         score = kge_model(triple).cpu().view(-1)
-        #         import math
-        #         train_iterator.dataloader_head.dataset.subsampling_weights[triple] = 1 - (kge_model.gamma.item() - score) / (3 * math.sqrt(args.hidden_dim))
             true_triples = set(train_triples) - set(fake_triples)
             scores, label = [], []
             for triple in true_triples:
@@ -634,28 +628,61 @@ def main(args):
                 if not (triple == (0, 0, 0)):
                     scores.append(train_iterator.dataloader_head.dataset.subsampling_weights[triple].item())
                     label.append(0)
-            scores, label = np.array(scores), np.array(label)
-            from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
-            p = precision_score(label, scores > 0.5)
-            r = recall_score(label, scores > 0.5)
-            f1 = f1_score(label, scores > 0.5)
-            auc = roc_auc_score(label, scores > 0.5)
-            logging.info(f"""
-            precision = {p} 
-            recall = {r}    
-            f1 score = {f1} 
-            auc score = {auc}   
-            """)
-            p = precision_score(1 - label, scores < 0.5)
-            r = recall_score(1 - label, scores < 0.5)
-            f1 = f1_score(1 - label, scores < 0.5)
-            auc = roc_auc_score(1 - label, scores < 0.5)
-            logging.info(f"""
-                    precision = {p} 
-                    recall = {r}    
-                    f1 score = {f1} 
-                    auc score = {auc}   
-                    """)
+        else:
+            print("start to use sigmoid to translate distance to probability")
+            scores, label = [], []
+            true_triples = set(train_triples) - set(fake_triples)
+            i = 0
+            import sys
+            while i < len(train_iterator.dataloader_head.dataset.triples):
+                sys.stdout.write("%d in %d\r" % (i, len(train_iterator.dataloader_head.dataset.triples)))
+                sys.stdout.flush()
+                j = min(i + 1024, len(train_iterator.dataloader_head.dataset.triples))
+                sample = torch.LongTensor(train_iterator.dataloader_head.dataset.triples[i: j]).cuda()
+                score = kge_model(sample).detach().cpu().view(-1)
+                for x, triple in enumerate(train_iterator.dataloader_head.dataset.triples[i: j]):
+                    if triple in true_triples:
+                        label.append(1)
+                        scores.append(torch.sigmoid(score[x]))
+                    elif triple in fake_triples:
+                        label.append(0)
+                        scores.append(torch.sigmoid(score[x]))
+                i = j
+                del sample
+                del score
+            # for triple in tqdm(train_iterator.dataloader_head.dataset.triples):
+            #     x = triple
+            #     triple = torch.LongTensor(triple).unsqueeze(0).cuda()
+            #     score = kge_model(triple).cpu().view(-1)
+            #     # train_iterator.dataloader_head.dataset.subsampling_weights[triple] = torch.sigmoid(score)
+            #     if x in true_triples:
+            #         label.append(1)
+            #         scores.append(torch.sigmoid(score))
+            #     elif x in fake_triples:
+            #         label.append(0)
+            #         scores.append(torch.sigmoid(score))
+        scores, label = np.array(scores), np.array(label)
+        from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
+        p = precision_score(label, scores > 0.5)
+        r = recall_score(label, scores > 0.5)
+        f1 = f1_score(label, scores > 0.5)
+        auc = roc_auc_score(label, scores > 0.5)
+        logging.info(f"""
+        precision = {p} 
+        recall = {r}    
+        f1 score = {f1} 
+        auc score = {auc}   
+        """)
+        p = precision_score(1 - label, scores < 0.5)
+        r = recall_score(1 - label, scores < 0.5)
+        f1 = f1_score(1 - label, scores < 0.5)
+        auc = roc_auc_score(1 - label, scores < 0.5)
+        logging.info(f"""
+                precision = {p} 
+                recall = {r}    
+                f1 score = {f1} 
+                auc score = {auc}   
+                """)
 
     if args.evaluate_train:
         logging.info('Evaluating on Training Dataset...')
