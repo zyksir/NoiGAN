@@ -1,5 +1,8 @@
+#!/usr/bin/python
+# -*- coding:utf8 -*-
 ######################################
-# generate fake data
+# 生成噪声
+# 目前只考虑generate_fake_data
 import random
 import torch
 import tqdm
@@ -25,7 +28,6 @@ def generate_fake_data(data_path="../data/FB15k/", num=10):
                     pass
         return triples
 
-
     with open(os.path.join(data_path, 'entities.dict')) as fin:
         entity2id = dict()
         for line in fin:
@@ -37,13 +39,11 @@ def generate_fake_data(data_path="../data/FB15k/", num=10):
         for line in fin:
             rid, relation = line.strip().split('\t')
             relation2id[relation] = int(rid)
-    nrelation = len(relation2id)
-    nentity = len(entity2id)
+
     train_triples = read_triple(os.path.join(data_path, 'train.txt'), entity2id, relation2id)
     valid_triples = read_triple(os.path.join(data_path, 'valid.txt'), entity2id, relation2id)
     test_triples = read_triple(os.path.join(data_path, 'test.txt'), entity2id, relation2id)
-    # fake_triples = pickle.load(open(os.path.join(data_path, "fake%d.pkl"%num), "rb"))
-    # train_triples += fake_triples
+
     all_triples = train_triples + valid_triples + test_triples
     true_head, true_tail, true_relation = defaultdict(lambda: set()), defaultdict(lambda: set()), defaultdict(lambda: set())
     relation2tail, relation2head = defaultdict(lambda: set()), defaultdict(lambda: set())
@@ -55,7 +55,7 @@ def generate_fake_data(data_path="../data/FB15k/", num=10):
         relation2head[r].add(h)
 
     fake_triples = set()
-    while len(fake_triples)<len(train_triples) * num // 100:
+    while len(fake_triples) < len(train_triples) * num // 100:
         sys.stdout.write("%d in %d\r" % (len(fake_triples), len(train_triples) * num // 100))
         sys.stdout.flush()
         h, r, t = random.choice(all_triples)
@@ -67,19 +67,24 @@ def generate_fake_data(data_path="../data/FB15k/", num=10):
     fake_triples = list(fake_triples)
     with open(os.path.join(data_path, "fake%d.pkl" % num), "wb") as f:
         pickle.dump(fake_triples, f)
+    print("finish generate %d percent fake data for %s" % (num, data_path))
 
-# generate_fake_data(data_path="../data/wn18rr/", num=30)
-# generate_fake_data(data_path="../data/wn18rr/", num=50)
-# generate_fake_data(data_path="../data/wn18rr/", num=70)
-# generate_fake_data(data_path="../data/wn18rr/", num=100)
-# generate_fake_data(data_path="../data/FB15k-237/", num=30)
-# generate_fake_data(data_path="../data/FB15k-237/", num=50)
-# generate_fake_data(data_path="../data/FB15k-237/", num=70)
-# generate_fake_data(data_path="../data/FB15k-237/", num=100)
-# generate_fake_data(data_path="../data/YAGO3-10/", num=30)
-# generate_fake_data(data_path="../data/YAGO3-10/", num=50)
-# generate_fake_data(data_path="../data/YAGO3-10/", num=70)
-# generate_fake_data(data_path="../data/YAGO3-10/", num=100)
+
+# generate_fake_data(data_path="../data/wn18rr/", num=40)
+generate_fake_data(data_path="../data/wn18rr/", num=70)
+generate_fake_data(data_path="../data/wn18rr/", num=100)
+# generate_fake_data(data_path="../data/FB15k-237/", num=40)
+generate_fake_data(data_path="../data/FB15k-237/", num=70)
+generate_fake_data(data_path="../data/FB15k-237/", num=100)
+# generate_fake_data(data_path="../data/wn18/", num=40)
+generate_fake_data(data_path="../data/wn18/", num=70)
+generate_fake_data(data_path="../data/wn18/", num=100)
+# generate_fake_data(data_path="../data/FB15k/", num=40)
+generate_fake_data(data_path="../data/FB15k/", num=70)
+generate_fake_data(data_path="../data/FB15k/", num=100)
+generate_fake_data(data_path="../data/YAGO3-10/", num=40)
+generate_fake_data(data_path="../data/YAGO3-10/", num=70)
+generate_fake_data(data_path="../data/YAGO3-10/", num=100)
 
 def generate_fakePath_data(data_path="../data/FB15k/", num=10):
     def read_triple(file_path, entity2id, relation2id):
@@ -143,7 +148,7 @@ def generate_fakePath_data(data_path="../data/FB15k/", num=10):
     with open(os.path.join(data_path, "fakePath%d.pkl" % num), "wb") as f:
         pickle.dump(fake_triples, f)
 
-generate_fakePath_data(data_path='../data/FB15k-237', num=40)
+# generate_fakePath_data(data_path='../data/FB15k-237', num=40)
 # generate_fakePath_data(data_path="../data/wn18rr", num=30)
 # generate_fakePath_data(data_path="../data/wn18rr", num=50)
 # generate_fakePath_data(data_path="../data/wn18rr", num=70)
@@ -202,15 +207,3 @@ generate_fakePath_data(data_path='../data/FB15k-237', num=40)
 #     with open(os.path.join(data_path, "fakeRand%d.pkl" % num), "wb") as f:
 #         pickle.dump(fake_triples, f)
 #     print(data_path)
-
-
-for epoch in range(1200):
-    log = classifier.train_classifier_step(kge_model, classifier, clf_opt, clf_iterator, args, generator=None,
-                                           model_name=args.model)
-head, relation, tail = classifier.get_embedding(kge_model, fake)
-all_weight = classifier.find_topK_triples(kge_model, classifier, train_iterator, clf_iterator,
-                                          GAN_iterator, soft=False, model_name=args.model)
-logging.info("fake percent %f in %d" % (fake_score.sum().item() / all_weight, all_weight))
-logging.info("fake triples in classifier training %d / %d" % (
-    len(set(fake_triples).intersection(set(clf_iterator.dataloader_head.dataset.triples))),
-    len(clf_iterator.dataloader_head.dataset.triples)))
