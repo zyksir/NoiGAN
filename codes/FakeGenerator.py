@@ -86,6 +86,8 @@ generate_fake_data(data_path="../data/YAGO3-10/", num=40)
 generate_fake_data(data_path="../data/YAGO3-10/", num=70)
 generate_fake_data(data_path="../data/YAGO3-10/", num=100)
 
+generate_fake_data(data_path="../data/YAGO3-10/", num=10)
+
 def generate_fakePath_data(data_path="../data/FB15k/", num=10):
     def read_triple(file_path, entity2id, relation2id):
         '''

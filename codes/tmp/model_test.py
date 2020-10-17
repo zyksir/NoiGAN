@@ -8,7 +8,7 @@ import numpy as np
 from collections import defaultdict
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
 from model import KGEModel, SimpleNN
-# def evaluate_classification(data_path, model_path):
+
 data_path = "../data/YAGO3-10"
 def read_triple(file_path, entity2id, relation2id):
     '''
@@ -415,3 +415,7 @@ with open("../data/FB15k-237/mid2type.pkl", "wb") as f:
 
 with open("../data/FB15k/mid2type.pkl", "wb") as f:
     pickle.dump(mid2type, f)
+
+dataset = ""
+with open("./models/TransE_%s_CLF_soft100/confidence_weight.pkl" % dataset, "rb") as f:
+    confidence_weight = pickle.load(f)
