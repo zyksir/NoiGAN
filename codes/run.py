@@ -341,8 +341,7 @@ def main(args):
                 trainer.cal_confidence_weight()
             elif args.method == "NoiGAN" and step % args.classify_steps == 0:
                 logging.info('Train NoiGAN')
-                metrics = trainer.train_NoiGAN(trainer)
-                log_metrics('NoiGAN', step, metrics)
+                trainer.train_NoiGAN(trainer)
                 metrics = trainer.test_ave_score(trainer)
                 log_metrics('Classifier', step, metrics)
                 trainer.cal_confidence_weight()

@@ -309,6 +309,24 @@ class BaseTrainer(object):
             "auc": roc_auc_score(y_true=y_true, y_score=y_score)
         }
 
+    def cal_confidence_weight(self):
+        i = 0
+        while i < len(self.train_triples):
+            sys.stdout.write("cal confidence weight: %d in %d\r" % (i, len(self.train_triples)))
+            sys.stdout.flush()
+            j = min(i + 1024, len(self.train_triples))
+            sample = torch.LongTensor(self.train_triples[i: j])
+            if self.args.cuda:
+                sample = sample.cuda()
+            confidence_weight = self.classifier(self.get_vector(sample)).cpu()
+            if self.hard:
+                confidence_weight = confidence_weight >= self.threshold
+            torch.cuda.empty_cache()
+            for x, triple in enumerate(self.train_triples[i: j]):
+                self.confidence_weight[triple] = confidence_weight[x]
+            i = j
+
+
 class LTTrainer(BaseTrainer):
     def __init__(self, train_triples, fake_triples, args, embedding_model):
         super(LTTrainer, self).__init__(train_triples, fake_triples, args, embedding_model)
@@ -375,23 +393,6 @@ class ClassifierTrainer(BaseTrainer):
             #     negative_triples.add((h, r__, t))
             # # negative_triples.add(random.choice(candidate_negative_triples))
         return list(negative_triples)
-
-    def cal_confidence_weight(self):
-        i = 0
-        while i < len(self.train_triples):
-            sys.stdout.write("cal confidence weight: %d in %d\r" % (i, len(self.train_triples)))
-            sys.stdout.flush()
-            j = min(i + 1024, len(self.train_triples))
-            sample = torch.LongTensor(self.train_triples[i: j])
-            if self.args.cuda:
-                sample = sample.cuda()
-            confidence_weight = self.classifier(self.get_vector(sample)).cpu()
-            if self.hard:
-                confidence_weight = confidence_weight >= self.threshold
-            torch.cuda.empty_cache()
-            for x, triple in enumerate(self.train_triples[i: j]):
-                self.confidence_weight[triple] = confidence_weight[x]
-            i = j
 
     @staticmethod
     def train_classifier(trainer):

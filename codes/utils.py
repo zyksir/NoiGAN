@@ -76,8 +76,16 @@ for triple in train_triples:
     label.append(1)
 
 min100_triple = np.array(predict).argsort()[:100]
-with open("codes/case_study.txt", "w") as fw:
+with open("codes/min_score_true100.txt", "w") as fw:
     for index in min100_triple:
+        h, r, t = train_triples[index]
+        head, relation, tail = id2entity[h], id2relation[r], id2entity[t]
+        print("%s\t%s\t%s\t%f" % (head, relation, tail, predict[index]))
+        fw.write("%s\t%s\t%s\t%f\n" % (head, relation, tail, predict[index]))
+
+max100_triple = np.array(predict).argsort()[-100:]
+with open("codes/max_score_true100.txt", "w") as fw:
+    for index in max100_triple:
         h, r, t = train_triples[index]
         head, relation, tail = id2entity[h], id2relation[r], id2entity[t]
         print("%s\t%s\t%s\t%f" % (head, relation, tail, predict[index]))

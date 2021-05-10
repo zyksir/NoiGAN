@@ -2,8 +2,8 @@
 <project version="4">
   <component name="WebServers">
     <option name="servers">
-      <webServer id="af2569eb-d7a3-4454-a66e-e38d9b559744" name="KnowgraphGraph" url="http://162.105.146.224">
-        <fileTransfer host="162.105.146.224" port="22" rootFolder="/home2/zyk" accessType="SFTP">
+      <webServer id="af2569eb-d7a3-4454-a66e-e38d9b559744" name="Scai" url="http://qilin.cs.ucla.edu">
+        <fileTransfer host="qilin.cs.ucla.edu" port="22" privateKey="$USER_HOME$/.ssh/id_rsa" rootFolder="/home/zyksir" accessType="SFTP" keyPair="true">
           <advancedOptions>
             <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
           </advancedOptions>

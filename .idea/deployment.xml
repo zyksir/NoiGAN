@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" serverName="KnowgraphGraph">
+  <component name="PublishConfigData" serverName="Scai">
     <serverData>
-      <paths name="KnowgraphGraph">
+      <paths name="Scai">
         <serverdata>
           <mappings>
             <mapping deploy="/KnowledgeGraphEmbedding" local="$PROJECT_DIR$" web="/" />
