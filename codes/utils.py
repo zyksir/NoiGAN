@@ -1,31 +1,170 @@
-# # 遍历一个文件夹下所有文件
-# import os
-# import re
-# dirs = os.listdir("./models/")
-# table = []
-# for name in dirs:
-#     # if len(name.split("_")) != 4:
-#     #     continue
-#     if 'clear' not in name:
-#         continue
-#     filename = "./models/%s/train.log" % name
-#     with open(filename, "r") as f:
-#         lines = f.read().split("\n")[-6:]
-#         output = name.split("_")[:3]
-#         # output[2] = int(re.findall(r"\d+",output[2])[0])
-#         for line in lines:
-#             if "Test" in line:
-#                 output.append(line.split(":")[-1])
-#         table.append(output)
-# table = sorted(table)
-# table = [[str(i) for i in line] for line in table]
-# table = "\n".join(["\t".join(line) for line in table])
-# print(table)
-
-import pickle
 import os
+import logging
+import datetime
+import argparse
+import pickle
+import datetime
+import json
+import logging
+import os
+import random
+from IPython import embed
 import numpy as np
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+import torch
+
+class InputData(object):
+    def __init__(self, entity2id, relation2id, train_triples, valid_triples, test_triples,
+                 fake_triples=None, fake=None):
+        self.entity2id = entity2id
+        self.relation2id = relation2id
+        self.train_triples = train_triples
+        self.valid_triples = valid_triples
+        self.test_triples = test_triples
+        self.all_true_triples = train_triples + valid_triples + test_triples
+        self.fake_triples = fake_triples
+        self.fake = fake
+
+def parse_args(args=None):
+    parser = argparse.ArgumentParser(
+        description='Training and Testing Knowledge Graph Embedding Models',
+        usage='train.py [<args>] [-h | --help]'
+    )
+
+    parser.add_argument('--cuda', action='store_true', help='use GPU')
+
+    parser.add_argument('--method', default="", type=str, choices=["", "NoiGAN", "LT", "CLF"])
+    parser.add_argument('--hard', action='store_true')
+    parser.add_argument("--fake", type=str, default=None, help="fake data used")
+    parser.add_argument('--do_train', action='store_true')
+    parser.add_argument('--do_valid', action='store_true')
+    parser.add_argument('--do_test', action='store_true')
+    parser.add_argument('--evaluate_train', action='store_true', help='Evaluate on training data')
+
+    parser.add_argument('--data_path', type=str, default=None, help="dataset we used")
+    parser.add_argument('--model', default='TransE', type=str)
+    parser.add_argument('-de', '--double_entity_embedding', action='store_true')
+    parser.add_argument('-dr', '--double_relation_embedding', action='store_true')
+
+    parser.add_argument('-n', '--negative_sample_size', default=128, type=int)
+    parser.add_argument('-d', '--hidden_dim', default=500, type=int)
+    parser.add_argument('-g', '--gamma', default=12.0, type=float)
+    parser.add_argument('-adv', '--negative_adversarial_sampling', action='store_true')
+    parser.add_argument('-a', '--adversarial_temperature', default=1.0, type=float)
+    parser.add_argument('-b', '--batch_size', default=1024, type=int)
+    parser.add_argument('-r', '--regularization', default=0.0, type=float)
+    parser.add_argument('--test_batch_size', default=4, type=int, help='valid/test batch size')
+    parser.add_argument('--uni_weight', action='store_true',
+                        help='Otherwise use subsampling weighting like in word2vec')
+
+    parser.add_argument('-lr', '--learning_rate', default=0.0001, type=float)
+    parser.add_argument('-cpu', '--cpu_num', default=10, type=int)
+    parser.add_argument('-init', '--init_checkpoint', default=None, type=str)
+    parser.add_argument('--max_steps', default=100000, type=int)
+    parser.add_argument('--warm_up_steps', default=None, type=int)
+
+    # about model saving, usually we should NOT save models to save space
+    parser.add_argument('--no_save', action='store_true', help='do not save models')
+    parser.add_argument('-save', '--save_path', default=None, type=str)
+    parser.add_argument('--comments', default="\n", type=str)
+    parser.add_argument('--save_checkpoint_steps', default=10000, type=int)
+    parser.add_argument('--valid_steps', default=10000, type=int)
+    parser.add_argument('--log_steps', default=100, type=int, help='train log every xx steps')
+    parser.add_argument('--classify_steps', default=5000, type=int, help='regiven weight log every xx steps')
+    parser.add_argument('--test_log_steps', default=1000, type=int, help='valid/test log every xx steps')
+
+    parser.add_argument('--nentity', type=int, default=0, help='DO NOT MANUALLY SET')
+    parser.add_argument('--nrelation', type=int, default=0, help='DO NOT MANUALLY SET')
+
+    return parser.parse_args(args)
+
+def checkArgsValidation(args):
+    if (not args.do_train) and (not args.do_valid) and (not args.do_test):
+        raise ValueError('one of train/val/test mode must be choosed.')
+
+    if not args.do_train and args.init_checkpoint:
+        override_config(args)
+    elif args.data_path is None:
+        raise ValueError('one of init_checkpoint/data_path must be choosed.')
+
+    if args.do_train and args.save_path is None:
+        raise ValueError('you must set save_path for log and model file saving')
+
+def init(args):
+    if args.save_path and not os.path.exists(args.save_path):
+        os.makedirs(args.save_path)
+
+    set_logger(args)
+
+    with open(os.path.join(args.data_path, 'entities.dict')) as fin:
+        entity2id = dict()
+        for line in fin:
+            eid, entity = line.strip().split('\t')
+            entity2id[entity] = int(eid)
+
+    with open(os.path.join(args.data_path, 'relations.dict')) as fin:
+        relation2id = dict()
+        for line in fin:
+            rid, relation = line.strip().split('\t')
+            relation2id[relation] = int(rid)
+
+    args.nentity, args.nrelation = len(entity2id), len(relation2id)
+
+    train_triples = read_triple(os.path.join(args.data_path, "train.txt"), entity2id, relation2id)
+    valid_triples = read_triple(os.path.join(args.data_path, 'valid.txt'), entity2id, relation2id)
+    test_triples = read_triple(os.path.join(args.data_path, 'test.txt'), entity2id, relation2id)
+    fake, fake_triples = None, []
+    if args.fake:
+        fake_triples = pickle.load(open(os.path.join(args.data_path, "fake%s.pkl" % args.fake), "rb"))
+        train_triples += fake_triples
+        fake = torch.LongTensor(fake_triples)
+        if args.cuda:
+            fake = fake.cuda()
+
+    logging.info(args.comments)
+    logging.info('Model: %s' % args.model)
+    logging.info('Data Path: %s' % args.data_path)
+    logging.info('#entity: %d' % args.nentity)
+    logging.info('#relation: %d' % args.nrelation)
+    logging.info('#train: %d\t#valid: %d\t#test: %d' % (len(train_triples), len(valid_triples), len(test_triples)))
+
+    return InputData(entity2id=entity2id,
+                     relation2id=relation2id,
+                     train_triples=train_triples,
+                     valid_triples=valid_triples,
+                     test_triples=test_triples,
+                     fake_triples=fake_triples, fake=fake)
+
+def log_metrics(mode, step, metrics):
+    for metric in metrics:
+        logging.info('%s %s at step %d: %f' % (mode, metric, step, metrics[metric]))
+
+def set_logger(args):
+    '''
+    Write logs to checkpoint and console
+    '''
+    today = datetime.datetime.now()
+    if args.do_train:
+        log_file = os.path.join(args.save_path or args.init_checkpoint, 'train-%d-%d.log' % (today.month, today.day))
+    else:
+        log_file = os.path.join(args.save_path or args.init_checkpoint, 'test-%d-%d.log' % (today.month, today.day))
+
+    # if os.path.exists(log_file):
+    #     command = input("log file exists in %s, are you sure you want to override it?(Y/N)" % log_file)
+    #     if command.lower() == "n":
+    #         exit(0)
+
+    logging.basicConfig(
+        format='%(asctime)s %(levelname)-8s %(message)s',
+        level=logging.INFO,
+        datefmt='%Y-%m-%d %H:%M:%S',
+        filename=log_file,
+        filemode='w'
+    )
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s %(levelname)-8s %(message)s')
+    console.setFormatter(formatter)
+    logging.getLogger('').addHandler(console)
 
 def read_triple(file_path, entity2id, relation2id):
     '''
@@ -35,67 +174,65 @@ def read_triple(file_path, entity2id, relation2id):
     with open(file_path) as fin:
         for line in fin:
             h, r, t = line.strip().split('\t')
-            try:
-                triples.append((entity2id[h], relation2id[r], entity2id[t]))
-            except:
-                pass
+            triples.append((entity2id[h], relation2id[r], entity2id[t]))
     return triples
 
-dataset = "YAGO3-10"
-fake = 10
-data_path = "./data/%s" % dataset
+def save_model(model, optimizer, save_variable_list, args, trainer=None):
+    '''
+    Save the parameters of the model and the optimizer,
+    as well as some other variables such as step and learning_rate
+    '''
+    if args.no_save:
+        return
+    argparse_dict = vars(args)
+    with open(os.path.join(args.save_path, 'config.json'), 'w') as fjson:
+        json.dump(argparse_dict, fjson)
 
-with open(os.path.join(data_path, 'entities.dict')) as fin:
-    entity2id = dict()
-    id2entity = dict()
-    for line in fin:
-        eid, entity = line.strip().split('\t')
-        entity2id[entity] = int(eid)
-        id2entity[int(eid)] = entity
+    checkpoint = {
+        **save_variable_list,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict()
+    }
+    if trainer is not None:
+        if "classifier" in trainer.__dict__ is not None:
+            checkpoint["classifier"] = trainer.classifier.state_dict()
+        if "generator" in trainer.__dict__ is not None:
+            checkpoint["generator"] = trainer.generator.state_dict()
+        if "confidence_weight" in trainer.__dict__ is not None:
+            with open(os.path.join(args.save_path, 'confidence_weight.pkl'), "wb") as f:
+                pickle.dump(trainer.confidence_weight, f)
+    torch.save(checkpoint, os.path.join(args.save_path, 'checkpoint'))
 
-with open(os.path.join(data_path, 'relations.dict')) as fin:
-    relation2id = dict()
-    id2relation = dict()
-    for line in fin:
-        rid, relation = line.strip().split('\t')
-        relation2id[relation] = int(rid)
-        id2relation[int(rid)] = relation
+    entity_embedding = model.entity_embedding.detach().cpu().numpy()
+    np.save(
+        os.path.join(args.save_path, 'entity_embedding.npy'),
+        entity_embedding
+    )
 
-nentity = len(entity2id)
-nrelation = len(relation2id)
-train_triples = read_triple(os.path.join(data_path, 'train.txt'), entity2id, relation2id)
-fake_triples = pickle.load(open(os.path.join(data_path, "fake%s.pkl" % fake), "rb"))
+    relation_embedding = model.relation_embedding.detach().cpu().numpy()
+    np.save(
+        os.path.join(args.save_path, 'relation_embedding.npy'),
+        relation_embedding
+    )
 
-model = "TransE"
-with open("./models/%s_%s_CLF_soft10/confidence_weight.pkl" % (model, dataset), "rb") as f:
-    confidence_weight = pickle.load(f)
 
-predict, label = [], []
-for triple in train_triples:
-    predict.append(confidence_weight[triple].item())
-    label.append(1)
+def override_config(args):
+    '''
+    Override model and data configuration
+    '''
 
-min100_triple = np.array(predict).argsort()[:100]
-with open("codes/min_score_true100.txt", "w") as fw:
-    for index in min100_triple:
-        h, r, t = train_triples[index]
-        head, relation, tail = id2entity[h], id2relation[r], id2entity[t]
-        print("%s\t%s\t%s\t%f" % (head, relation, tail, predict[index]))
-        fw.write("%s\t%s\t%s\t%f\n" % (head, relation, tail, predict[index]))
+    with open(os.path.join(args.init_checkpoint, 'config.json'), 'r') as fjson:
+        argparse_dict = json.load(fjson)
+    args.__dict__ = argparse_dict
 
-max100_triple = np.array(predict).argsort()[-100:]
-with open("codes/max_score_true100.txt", "w") as fw:
-    for index in max100_triple:
-        h, r, t = train_triples[index]
-        head, relation, tail = id2entity[h], id2relation[r], id2entity[t]
-        print("%s\t%s\t%s\t%f" % (head, relation, tail, predict[index]))
-        fw.write("%s\t%s\t%s\t%f\n" % (head, relation, tail, predict[index]))
-
-# for triple in fake_triples:
-#     predict.append(confidence_weight[triple].item())
-#     label.append(0)
-#
-# y_score, y_true = np.array(predict), np.array(label)
-# auc = roc_auc_score(y_true=y_true, y_score=y_score)
-# specificity = recall_score(y_true=1 - y_true, y_pred=y_score < 0.5)
-# print("auc: %f, specificity: %f" % (auc, specificity))
+    # if args.data_path is None:
+    #     args.data_path = argparse_dict['data_path']
+    # args.model = argparse_dict['model']
+    # args.double_entity_embedding = argparse_dict['double_entity_embedding']
+    # args.double_relation_embedding = argparse_dict['double_relation_embedding']
+    # args.hidden_dim = argparse_dict['hidden_dim']
+    # args.test_batch_size = argparse_dict['test_batch_size']
+    # args.fake = argparse_dict['fake']
+    # if not args.do_train:
+    #     args.method = argparse_dict['method']
+    #     args.save_path = argparse_dict['save_path']

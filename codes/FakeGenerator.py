@@ -1,8 +1,7 @@
 #!/usr/bin/python
 # -*- coding:utf8 -*-
-######################################
-# 生成噪声
-# 目前只考虑generate_fake_data
+
+# 生成噪声, 目前只考虑generate_fake_data
 import random
 import torch
 import tqdm
@@ -69,24 +68,10 @@ def generate_fake_data(data_path="../data/FB15k/", num=10):
         pickle.dump(fake_triples, f)
     print("finish generate %d percent fake data for %s" % (num, data_path))
 
-
-# generate_fake_data(data_path="../data/wn18rr/", num=40)
-generate_fake_data(data_path="../data/wn18rr/", num=70)
-generate_fake_data(data_path="../data/wn18rr/", num=100)
-# generate_fake_data(data_path="../data/FB15k-237/", num=40)
-generate_fake_data(data_path="../data/FB15k-237/", num=70)
-generate_fake_data(data_path="../data/FB15k-237/", num=100)
-# generate_fake_data(data_path="../data/wn18/", num=40)
-generate_fake_data(data_path="../data/wn18/", num=70)
-generate_fake_data(data_path="../data/wn18/", num=100)
-# generate_fake_data(data_path="../data/FB15k/", num=40)
-generate_fake_data(data_path="../data/FB15k/", num=70)
-generate_fake_data(data_path="../data/FB15k/", num=100)
-generate_fake_data(data_path="../data/YAGO3-10/", num=40)
-generate_fake_data(data_path="../data/YAGO3-10/", num=70)
-generate_fake_data(data_path="../data/YAGO3-10/", num=100)
-
-generate_fake_data(data_path="../data/YAGO3-10/", num=10)
+for num in [30]:
+    for dataset in ["wn18rr", "FB15k-237", "wn18", "FB15k", "YAGO3-10"]:
+        data_path = "../data/%s/" % dataset
+        generate_fake_data(data_path=data_path, num=num)
 
 def generate_fakePath_data(data_path="../data/FB15k/", num=10):
     def read_triple(file_path, entity2id, relation2id):

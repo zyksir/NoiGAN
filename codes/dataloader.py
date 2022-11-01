@@ -7,7 +7,7 @@ from __future__ import print_function
 import numpy as np
 import torch
 
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 
 class TrainDataset(Dataset):
     def __init__(self, triples, nentity, nrelation, negative_sample_size, mode):
@@ -180,3 +180,34 @@ class BidirectionalOneShotIterator(object):
         while True:
             for data in dataloader:
                 yield data
+
+
+def get_test_dataset_list(test_triples, all_true_triples, args):
+    test_dataloader_head = DataLoader(
+        TestDataset(
+            test_triples,
+            all_true_triples,
+            args.nentity,
+            args.nrelation,
+            'head-batch'
+        ),
+        batch_size=args.test_batch_size,
+        num_workers=max(1, args.cpu_num // 2),
+        collate_fn=TestDataset.collate_fn
+    )
+
+    test_dataloader_tail = DataLoader(
+        TestDataset(
+            test_triples,
+            all_true_triples,
+            args.nentity,
+            args.nrelation,
+            'tail-batch'
+        ),
+        batch_size=args.test_batch_size,
+        num_workers=max(1, args.cpu_num // 2),
+        collate_fn=TestDataset.collate_fn
+    )
+
+    test_dataset_list = [test_dataloader_head, test_dataloader_tail]
+    return test_dataset_list

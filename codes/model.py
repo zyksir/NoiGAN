@@ -14,9 +14,8 @@ import torch.nn.functional as F
 
 from sklearn.metrics import average_precision_score
 from IPython import embed
-from torch.utils.data import DataLoader
 
-from dataloader import TestDataset
+from dataloader import get_test_dataset_list
 
 class KGEModel(nn.Module):
     def __init__(self, model_name, nentity, nrelation, hidden_dim, gamma, 
@@ -336,33 +335,7 @@ class KGEModel(nn.Module):
 
         #Otherwise use standard (filtered) MRR, MR, HITS@1, HITS@3, and HITS@10 metrics
         #Prepare dataloader for evaluation
-        test_dataloader_head = DataLoader(
-            TestDataset(
-                test_triples,
-                all_true_triples,
-                args.nentity,
-                args.nrelation,
-                'head-batch'
-            ),
-            batch_size=args.test_batch_size,
-            num_workers=max(1, args.cpu_num//2),
-            collate_fn=TestDataset.collate_fn
-        )
-
-        test_dataloader_tail = DataLoader(
-            TestDataset(
-                test_triples,
-                all_true_triples,
-                args.nentity,
-                args.nrelation,
-                'tail-batch'
-            ),
-            batch_size=args.test_batch_size,
-            num_workers=max(1, args.cpu_num//2),
-            collate_fn=TestDataset.collate_fn
-        )
-
-        test_dataset_list = [test_dataloader_head, test_dataloader_tail]
+        test_dataset_list = get_test_dataset_list(test_triples, all_true_triples, args)
 
         logs = []
 
